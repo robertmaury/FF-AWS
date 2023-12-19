@@ -1,0 +1,125 @@
+name: Firefly Terraform Run
+
+on:
+  pull_request:
+    branches:
+      - 'main'
+  push:
+    branches:
+      - 'main'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Should Apply?'
+        type: boolean
+        default: false
+
+      workspace:
+        description: 'Workspace:'
+        required: true
+        default: 'aws-stag'
+        type: choice
+        options:
+        - 'environments/aws-stag'
+        - '*'
+        
+jobs:
+  setup:
+    name: 'Workspaces Setup'
+    runs-on: ubuntu-latest
+    outputs:
+      workspaces: ${{ steps.set-params.outputs.workspaces }}
+      apply: ${{ steps.set-params.outputs.apply }}
+    steps:
+      - id: set-params
+        name: 'Set deployment parameters'
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ github.event.inputs.workspace }}" = "*" ]; then
+              echo "::set-output name=workspaces::[\"environments/aws-stag\"]"
+            else
+              echo "::set-output name=workspaces::[\"${{ github.event.inputs.workspace }}\"]"
+            fi
+            echo "::set-output name=apply::${{ github.event.inputs.apply }}"
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "::set-output name=workspaces::[\"environments/aws-stag\"]"
+            echo "::set-output name=apply::true"
+          else
+            echo "::set-output name=workspaces::[\"environments/aws-stag\"]"
+            echo "::set-output name=apply::false"
+          fi
+          
+  run:
+    name: 'Run Workspace'
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        workspace: ${{ fromJson(needs.setup.outputs.workspaces) }}
+    needs: setup
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.workspace }}
+
+    env:
+        # GOOGLE_CREDENTIALS: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+        FIREFLY_ACCESS_KEY: ${{ secrets.FIREFLY_ACCESS_KEY }}
+        FIREFLY_SECRET_KEY: ${{ secrets.FIREFLY_SECRET_KEY }}
+        AWS_REGION: ${{ secrets.AWS_REGION }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        # TF_VAR_example_var: ${{ secrets.EXAMPLE_VAR }}
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v2
+
+    - name: Get changed files in workspace folder
+      id: changed-files-in-workspace
+      uses: tj-actions/changed-files@v40
+      with:
+        files: ${{ matrix.workspace }}/**
+
+    - name: Set up Terraform
+      if: steps.changed-files-in-workspace.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
+      uses: hashicorp/setup-terraform@v1
+      with:
+          terraform_wrapper: false
+          terraform_version: "1.6.5"
+
+    # - name: Configure AWS credentials
+    #   run: |
+    #     aws configure set aws_access_key_id ${{ secrets.STAGE_AWS_ACCESS_KEY_ID }} --profile aws-stage
+    #     aws configure set aws_secret_access_key ${{ secrets.STAGE_AWS_SECRET_ACCESS_KEY }} --profile aws-stage
+      
+    - name: Terraform Init in the ${{ matrix.workspace }} workspace
+      if: steps.changed-files-in-workspace.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
+      run: terraform init
+
+    - name: Terraform Plan
+      if: steps.changed-files-in-workspace.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
+      run: |
+        terraform plan -out tf.plan
+        terraform show -json tf.plan > plan.json
+
+    - name: Firefly Post-Plan
+      if: steps.changed-files-in-workspace.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
+      run: |
+        curl -O https://gofirefly-prod-iac-ci-cli-binaries.s3.amazonaws.com/fireflyci/latest/fireflyci_Linux_x86_64.tar.gz
+        tar -xf fireflyci_Linux_x86_64.tar.gz
+        chmod a+x fireflyci
+        ./fireflyci post-plan -f plan.json --timeout 180 --workspace ${{ matrix.workspace }} --config-file ${{ github.workspace }}/config.yaml
+
+    - name: Terraform Apply
+      if: needs.setup.outputs.apply == 'true' && (steps.changed-files-in-workspace.outputs.any_changed == 'true'  || github.event_name == 'workflow_dispatch')
+      id: apply
+      run: |
+        terraform apply --auto-approve -json > apply_log.jsonl
+      continue-on-error: true
+      
+
+    - name: Firefly Post-Apply
+      if: needs.setup.outputs.apply == 'true' && (steps.changed-files-in-workspace.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch')
+      run: |
+        ./fireflyci post-apply -f apply_log.jsonl --timeout 180 --workspace ${{ matrix.workspace }}
