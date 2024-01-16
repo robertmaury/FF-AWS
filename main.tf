@@ -131,7 +131,7 @@ resource "aws_lambda_function" "radio-scraper-411" {
   role          = "arn:aws:iam::821020995254:role/service-role/radio-scraper-role-s6pbe61t"
   runtime       = "python3.11"
   s3_bucket         = "rmaury-lambda-datastore"  # replace with your bucket name
-  s3_key            = "radio-scraper.zip"  # replace with your object key
+  s3_key            = "lambda_fuction.zip"  # replace with your object key
 
   tags = {
     app                        = "radio-scraper"
